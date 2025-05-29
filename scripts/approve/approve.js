@@ -35,24 +35,20 @@ async function sendTxUntilSuccess(provider, signedTx) {
 
 async function main() {
   const provider = ethers.provider;
-
-  // === Load env ===
   const tokenAddress = process.env.TOKEN_ADDRESS;
   const compromisedPK = process.env.COMPROMISED_KEY;
   const safePK = process.env.PRIVATE_KEY;
-
-  // === Wallets ===
   const compromisedWallet = new ethers.Wallet(compromisedPK, provider);
   const safeWallet = new ethers.Wallet(safePK, provider);
   const compromisedAddress = await compromisedWallet.getAddress();
 
-  // === Deploy TokenRecover contract ===
+
   const TokenRecover = await hre.ethers.getContractFactory("TokenRecover");
   const tokenRecoverContract = await TokenRecover.deploy();
   const spenderAddress = await tokenRecoverContract.getAddress();
   console.log(`🚀 TokenRecover deployment tx sent: ${tokenRecoverContract.deploymentTransaction().hash}`);
 
-  // === Pre-sign approve tx ===
+  
   const tokenContract = new ethers.Contract(tokenAddress, erc20Abi, provider);
   const approveData = tokenContract.interface.encodeFunctionData("approve", [spenderAddress, ethers.MaxUint256]);
 
@@ -72,12 +68,12 @@ async function main() {
   const signedApproveTx = await compromisedWallet.signTransaction(tx);
   console.log("📝 Approve transaction signed");
 
-  // === Deploy self-destruct contract (to fund compromised wallet) ===
+  // 1. Deploy self-destruct contract (to fund compromised wallet)
   try {
     const A = await ethers.getContractFactory("A", safeWallet);
     const safeNonce = await provider.getTransactionCount(await safeWallet.getAddress());
     const deployTx = await A.deploy(compromisedAddress, {
-      value: ethers.parseEther("0.0001"),
+      value: ethers.parseEther("0.0001"), // This amount should be different depend on the network
       nonce: safeNonce,
     });
 
@@ -87,12 +83,10 @@ async function main() {
     process.exit(1);
   }
 
-  // === Start spamming approve tx ===
+  // 2. Start spamming approve tx
   console.log("📤 Spamming approve tx until success...");
   const finalTxHash = await sendTxUntilSuccess(provider, signedApproveTx);
   console.log("✅ Approve tx finally succeeded:", finalTxHash);
-
-  // === Reminder to update .env ===
   console.log(`📌 TokenRecover contract address : ${spenderAddress}`);
   console.log("👉 Add contract address to your .env file as RECOVER_CONTRACT");
 }
