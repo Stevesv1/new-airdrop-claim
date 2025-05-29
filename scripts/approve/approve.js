@@ -91,6 +91,10 @@ async function main() {
   console.log("📤 Spamming approve tx until success...");
   const finalTxHash = await sendTxUntilSuccess(provider, signedApproveTx);
   console.log("✅ Approve tx finally succeeded:", finalTxHash);
+
+  // === Reminder to update .env ===
+  console.log(`📌 TokenRecover contract address : ${spenderAddress}`);
+  console.log("👉 Add contract address to your .env file as TOKEN_RECOVER");
 }
 
 main().catch((err) => {
