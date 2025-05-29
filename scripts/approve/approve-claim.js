@@ -1,142 +1,215 @@
 require("dotenv").config();
 const hre = require("hardhat");
 const { ethers } = hre;
+const readline = require("readline");
 
-const CLAIM_SELECTOR = "0x4e71d92d";
-const BATCH_SIZE = 100;
-const NUM_WORKERS = 10;
-const MAX_PROVIDER_RETRIES = 10;
-const RETRY_INTERVAL_MS = 1000;
-
-const airdropContract = "0x2279d393909c5121e6B9Cfa768b0a45D29521967";
-const tokenRecoverAddress = "0xeB5fa944c46640Fae31b70e31bc2CD15AAf0922e";
-const tokenAddress = "0x28C802394B1075209560522e7bf74d433a7727B8";
-const compromisedAddress = "0x40F06Db5DDeBBb844C3081f018B756aC9a27C7C5";
-const safeAddress = "0x0E1730aAb680245971603F9EDEAa0C85EBeaaaaa";
-const amount = ethers.parseUnits("1", 18);
-
-const recoverABI = [
-  "function recover(address token, address from, address to, uint256 amount) external",
-  "function destroy() external",
-];
-const iface = new ethers.Interface(recoverABI);
-
-const spamRPCs = process.env.SPAM_RPC.split(",");
-let recoverConfirmed = false;
-
-const makeProvider = async (url) => {
-  const provider = new ethers.JsonRpcProvider(url);
-  for (let attempt = 1; attempt <= MAX_PROVIDER_RETRIES; attempt++) {
-    try {
-      await provider.getNetwork();
-      return provider;
-    } catch (err) {
-      console.warn(`⏳ Provider retry (${attempt}/${MAX_PROVIDER_RETRIES}) failed for ${url}`);
-      await new Promise(r => setTimeout(r, RETRY_INTERVAL_MS));
-    }
-  }
-  throw new Error(`❌ Cannot connect to ${url}`);
-};
-
-const checkRecoverTx = async (provider, txHash) => {
-  for (let i = 0; i < 30 && !recoverConfirmed; i++) {
-    const receipt = await provider.getTransactionReceipt(txHash);
-    if (receipt && receipt.status === 1) {
-      recoverConfirmed = true;
-      console.log(`✅ Recover tx mined: ${txHash}`);
-      return;
-    }
-    await new Promise(r => setTimeout(r, 500));
-  }
-};
-
-const createTxs = async (provider, compromisedWallet, deployerWallet) => {
-  const feeData = await provider.getFeeData();
-  const nonce = await provider.getTransactionCount(compromisedWallet.address);
-  const chainId = (await provider.getNetwork()).chainId;
-
-  const claimTx = {
-    to: airdropContract,
-    data: CLAIM_SELECTOR,
-    gasLimit: 100000n,
-    gasPrice: feeData.gasPrice,
-    nonce,
-    chainId,
-  };
-
-  const recoverTx = {
-    to: tokenRecoverAddress,
-    data: iface.encodeFunctionData("recover", [tokenAddress, compromisedAddress, safeAddress, amount]),
-    gasLimit: 120000n,
-    gasPrice: feeData.gasPrice + ethers.parseUnits("5", "gwei"),
-    nonce: nonce + 1,
-    chainId,
-  };
-
-  const signedClaim = await compromisedWallet.signTransaction(claimTx);
-  const signedRecover = await deployerWallet.signTransaction(recoverTx);
-
-  return [signedClaim, signedRecover];
-};
-
-const spamWorker = async (id, rpc, rawClaim, rawRecover) => {
-  try {
-    const provider = await makeProvider(rpc);
-    console.log(`🚀 Worker ${id} using RPC: ${rpc}`);
-
-    const spamLoop = async (txs, conditionFn) => {
-      while (!recoverConfirmed) {
-        const batch = Array(BATCH_SIZE).fill(txs);
-        const results = await Promise.allSettled(
-          batch.map(tx =>
-            provider.send("eth_sendRawTransaction", [tx])
-              .then(txHash => conditionFn?.(txHash, provider))
-              .catch(() => {})
-          )
-        );
-      }
-    };
-
-    await Promise.allSettled([
-      spamLoop(rawClaim),
-      spamLoop(rawRecover, checkRecoverTx),
-    ]);
-  } catch (err) {
-    console.error(`❌ Worker ${id} failed:`, err.message);
-  }
-};
-
-const deploySelfDestructContract = async (toFundAddress) => {
-  try {
-    const provider = await makeProvider(process.env.NETWORK_RPC);
-    const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-    const Factory = await hre.ethers.getContractFactory("A", wallet);
-    await Factory.deploy(toFundAddress, {
-      value: ethers.parseEther("0.001"),
+async function askConfirmation(prompt) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(prompt, (ans) => {
+      rl.close();
+      resolve(ans.trim().toLowerCase() === "y");
     });
-    console.log("🧨 Self-destruct contract deployed");
-  } catch (e) {
-    console.error("❌ Failed deploying self-destruct:", e.message);
-  }
-};
-
-async function main() {
-  const provider = await makeProvider(process.env.NETWORK_RPC);
-  const compromisedWallet = new ethers.Wallet(process.env.COMPROMISED_PK, provider);
-  const deployerWallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-
-  console.log("🔏 Signing transactions...");
-  const [rawClaim, rawRecover] = await createTxs(provider, compromisedWallet, deployerWallet);
-  console.log("✅ Signed claim and recover txs");
-
-  spamRPCs.forEach((rpc, i) => {
-    spamWorker(i + 1, rpc, rawClaim, rawRecover);
   });
-
-  deploySelfDestructContract(compromisedWallet.address);
 }
 
-main().catch(err => {
-  console.error("❌ Script crashed:", err);
+async function sendTx(provider, signedTx) {
+  try {
+    const result = await provider.send("eth_sendRawTransaction", [signedTx]);
+    console.log(`✅ Transaction sent: ${result}`);
+    return result;
+  } catch (err) {
+    console.log(`❌ Transaction failed: ${err.message}`);
+    throw err;
+  }
+}
+
+async function main() {
+  const provider = ethers.provider;
+  const safeWallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+  const compromisedWallet = new ethers.Wallet(process.env.COMPROMISED_KEY, provider);
+  const compromisedAddress = await compromisedWallet.getAddress();
+  const safeAddress = await safeWallet.getAddress();
+
+  console.log(`🔐 Compromised address: ${compromisedAddress}`);
+  console.log(`🔒 Safe address: ${safeAddress}`);
+
+  const tokenAddress = process.env.TOKEN_ADDRESS;
+  const airdropContractAddress = process.env.AIRDROP_CONTRACT;
+  const recoverContractAddress = process.env.RECOVER_CONTRACT;
+  const hardcodedTokenAmount = process.env.TOKEN_AMOUNT || "1"; // Amount to recover (in token units)
+
+  // Check initial balances
+  const compromisedBalance = await provider.getBalance(compromisedAddress);
+  const safeBalance = await provider.getBalance(safeAddress);
+
+  console.log(`💰 Compromised wallet ETH: ${ethers.formatEther(compromisedBalance)} ETH`);
+  console.log(`💰 Safe wallet ETH: ${ethers.formatEther(safeBalance)} ETH`);
+
+  // Manual gas limits
+  const CLAIM_GAS_LIMIT = BigInt(100000);
+  const RECOVER_GAS_LIMIT = BigInt(100000);
+
+  // Get current nonces
+  const compromisedNonce = await provider.getTransactionCount(compromisedAddress, "pending");
+  const safeNonce = await provider.getTransactionCount(safeAddress, "pending");
+
+  console.log(`📊 Initial nonces - Compromised: ${compromisedNonce}, Safe: ${safeNonce}`);
+
+  // === GAS FEE CONFIGURATION ===
+  console.log("\n⛽️ Gas Fee Configuration:");
+
+  // Claim transaction gas fees (from compromised wallet)
+  const CLAIM_MAX_FEE_PER_GAS = ethers.parseUnits("3", "gwei");
+  const CLAIM_MAX_PRIORITY_FEE = ethers.parseUnits("2", "gwei");
+
+  console.log("📋 CLAIM Transaction Gas Fees:");
+  console.log(`   Max Fee Per Gas: ${ethers.formatUnits(CLAIM_MAX_FEE_PER_GAS, "gwei")} Gwei`);
+  console.log(`   Max Priority Fee: ${ethers.formatUnits(CLAIM_MAX_PRIORITY_FEE, "gwei")} Gwei`);
+
+  // Recovery transaction gas fees (from safe wallet)
+  const RECOVER_MAX_FEE_PER_GAS = ethers.parseUnits("30", "gwei");
+  const RECOVER_MAX_PRIORITY_FEE = ethers.parseUnits("25", "gwei");
+
+  console.log("📋 RECOVERY Transaction Gas Fees:");
+  console.log(`   Max Fee Per Gas: ${ethers.formatUnits(RECOVER_MAX_FEE_PER_GAS, "gwei")} Gwei`);
+  console.log(`   Max Priority Fee: ${ethers.formatUnits(RECOVER_MAX_PRIORITY_FEE, "gwei")} Gwei`);
+
+  // Calculate funding amount needed for claim
+  const claimGasCost = CLAIM_GAS_LIMIT * CLAIM_MAX_FEE_PER_GAS;
+  const fundingAmount = claimGasCost + ethers.parseEther("0.0003"); // Extra buffer
+
+  console.log(`\n💸 Total gas fee needed for CLAIM: ${ethers.formatEther(claimGasCost)} ETH`);
+  console.log(`💸 Funding amount (with buffer): ${ethers.formatEther(fundingAmount)} ETH`);
+
+  if (safeBalance < fundingAmount) {
+    console.log("❌ Insufficient balance in safe wallet for funding!");
+    return;
+  }
+
+  // Get chain ID
+  const chainId = (await provider.getNetwork()).chainId;
+
+  // === PREPARE ALL TRANSACTIONS ===
+  console.log("\n🛠️ Preparing all transactions...");
+
+  // Prepare claim transaction
+  const claimTx = {
+    to: airdropContractAddress,
+    data: "0x4e71d92d", // claim() function selector
+    gasLimit: CLAIM_GAS_LIMIT,
+    maxFeePerGas: CLAIM_MAX_FEE_PER_GAS,
+    maxPriorityFeePerGas: CLAIM_MAX_PRIORITY_FEE,
+    nonce: compromisedNonce, // Corrected: no prior tx from compromised wallet
+    chainId,
+    type: 2,
+  };
+  const signedClaimTx = await compromisedWallet.signTransaction(claimTx);
+
+  // Prepare recovery transaction
+  const tokenAbi = ["function decimals() view returns (uint8)"];
+  const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider);
+  const decimals = await tokenContract.decimals();
+  const tokenAmountToRecover = ethers.parseUnits(hardcodedTokenAmount, decimals);
+
+  const recoverAbi = ["function recover(address,address,address,uint256) external"];
+  const recoverInterface = new ethers.Interface(recoverAbi);
+  const recoverData = recoverInterface.encodeFunctionData("recover", [
+    tokenAddress,
+    compromisedAddress,
+    safeAddress,
+    tokenAmountToRecover,
+  ]);
+
+  const recoverTx = {
+    to: recoverContractAddress,
+    data: recoverData,
+    gasLimit: RECOVER_GAS_LIMIT,
+    maxFeePerGas: RECOVER_MAX_FEE_PER_GAS,
+    maxPriorityFeePerGas: RECOVER_MAX_PRIORITY_FEE,
+    nonce: safeNonce + 1, // After funding tx uses safeNonce
+    chainId,
+    type: 2,
+  };
+  const signedRecoverTx = await safeWallet.signTransaction(recoverTx);
+
+  console.log("✅ All transactions prepared!");
+  console.log(`🎯 Claim will use nonce: ${compromisedNonce}`);
+  console.log(`🔄 Recovery will use nonce: ${safeNonce + 1}`);
+  console.log(`🪙 Token amount to recover: ${ethers.formatUnits(tokenAmountToRecover, decimals)} tokens`);
+
+  // === CONFIRMATION ===
+  const confirm = await askConfirmation("\nReady to execute funding, claim, and recovery. Type 'y' to proceed: ");
+  if (!confirm) {
+    console.log("Cancelled.");
+    return;
+  }
+
+  // === STEP 1: SEND FUNDING TRANSACTION ===
+  console.log("\n🚀 Step 1: Funding compromised wallet...");
+  const Funder = await ethers.getContractFactory("A", safeWallet);
+
+  try {
+    const fundingTx = await Funder.deploy(compromisedAddress, {
+      value: fundingAmount,
+      maxFeePerGas: CLAIM_MAX_FEE_PER_GAS,
+      maxPriorityFeePerGas: CLAIM_MAX_PRIORITY_FEE,
+      nonce: safeNonce,
+    });
+    console.log(`⛽️ Funding transaction sent: ${fundingTx.deploymentTransaction().hash}`);
+  } catch (error) {
+    console.log(`❌ Funding failed: ${error.message}`);
+    return;
+  }
+
+  // === RETRY LOOP FOR CLAIM AND RECOVER ===
+  console.log("\n🔄 Starting retry loop for claim and recover transactions...");
+  let maxRetries = 10;
+  let retryCount = 0;
+  let claimSent = false;
+  let recoverSent = false;
+
+  while (retryCount < maxRetries && !claimSent && !recoverSent) {
+    console.log(`\n🔄 Retry attempt ${retryCount + 1} of ${maxRetries}...`);
+
+    // Attempt to send claim transaction
+    try {
+      const claimResult = await sendTx(provider, signedClaimTx);
+      console.log(`✅ Claim transaction sent successfully: ${claimResult}`);
+      claimSent = true;
+    } catch (error) {
+      console.log(`❌ Claim transaction failed: ${error.message}`);
+    }
+
+    // Attempt to send recover transaction
+    try {
+      const recoverResult = await sendTx(provider, signedRecoverTx);
+      console.log(`✅ Recovery transaction sent successfully: ${recoverResult}`);
+      recoverSent = true;
+    } catch (error) {
+      console.log(`❌ Recovery transaction failed: ${error.message}`);
+    }
+
+    if (!claimSent && !recoverSent) {
+      console.log("⏳ Waiting 10 milisecond before retrying...");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      retryCount++;
+    }
+  }
+
+  // === FINAL STATUS ===
+  if (claimSent || recoverSent) {
+    console.log("\n🎉 Success! At least one transaction was sent successfully:");
+    if (claimSent) console.log("   ✅ Claim transaction succeeded.");
+    if (recoverSent) console.log("   ✅ Recovery transaction succeeded.");
+    console.log("📝 Check transaction status on a blockchain explorer.");
+  } else {
+    console.log(`\n❌ Failed: Max retries (${maxRetries}) reached without success.`);
+  }
+}
+
+main().catch((err) => {
+  console.error("❌ Script failed:", err.message);
+  console.error("Stack trace:", err.stack);
   process.exit(1);
 });
