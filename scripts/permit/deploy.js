@@ -11,7 +11,7 @@ async function main() {
   await contract.waitForDeployment();
 
   console.log("PermitTransfer contract address :", await contract.getAddress());
-  console.log("Add contract address to your .env file as PERMIT_TRANSFER_CONTRACT");
+  console.log("Add this contract address to your .env file as PERMIT_TRANSFER_CONTRACT");
 }
 
 main().catch((error) => {
