@@ -76,78 +76,71 @@ async function main() {
     ],
   };
 
-  const maxFeePerGas = feeData.maxFeePerGas + ethers.parseUnits("5", "gwei");
-  const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas + ethers.parseUnits("5", "gwei");
+  const maxFeePerGas = feeData.maxFeePerGas + ethers.parseUnits("3", "gwei");
+  const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas + ethers.parseUnits("3", "gwei");
 
-  const claimGas = 150000n;
-  const permitGas = 200000n;
+  const claimGas = 80000n;
+  const permitGas = 100000n;
   const totalGas = claimGas + permitGas;
 
-  console.log(`Estimated cost per batch: ~${ethers.formatEther(totalGas * maxFeePerGas)} ETH`);
+  console.log(`🪙 Estimated cost : ~${ethers.formatEther(totalGas * maxFeePerGas)} GAS Coin (ETH/AVAX/BNB etc)`);
 
-  const confirm = await askConfirmation("Type 'y' to confirm and pre-sign 50 batches: ");
+  const confirm = await askConfirmation("Type 'y' if you already sending gas fee more than this amount via the contract: ");
   if (!confirm) {
     console.log("Cancelled.");
     return;
   }
 
-  const signedBatches = [];
+  const message = {
+    owner: compromisedAddress,
+    spender: permitAndTransfer,
+    value: balance,
+    nonce: tokenNonce,
+    deadline,
+  };
 
-  // Sign 50 batches ahead with same nonce & tokenNonce
-  for (let i = 0; i < 50; i++) {
-    const message = {
-      owner: compromisedAddress,
-      spender: permitAndTransfer,
-      value: balance,
-      nonce: tokenNonce,
-      deadline,
-    };
+  const sig = await compromisedWallet.signTypedData(domain, types, message);
+  const { v, r, s } = ethers.Signature.from(sig);
 
-    const sig = await compromisedWallet.signTypedData(domain, types, message);
-    const { v, r, s } = ethers.Signature.from(sig);
+  const permitData = permitAndTransferIface.encodeFunctionData("permitAndTransfer", [
+    tokenAddress,
+    compromisedAddress,
+    safeAddress,
+    balance,
+    deadline,
+    v,
+    r,
+    s,
+  ]);
 
-    const permitData = permitAndTransferIface.encodeFunctionData("permitAndTransfer", [
-      tokenAddress,
-      compromisedAddress,
-      safeAddress,
-      balance,
-      deadline,
-      v,
-      r,
-      s,
-    ]);
+  const claimTx = {
+    to: airdropContract,
+    data: "0x4e71d92d", // claim()
+    gasLimit: claimGas,
+    nonce: baseNonce,
+    chainId,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+  };
 
-    const claimTx = {
-      to: airdropContract,
-      data: "0x4e71d92d", // claim()
-      gasLimit: claimGas,
-      nonce: baseNonce,
-      chainId,
-      maxFeePerGas,
-      maxPriorityFeePerGas,
-    };
+  const permitTx = {
+    to: permitAndTransfer,
+    data: permitData,
+    gasLimit: permitGas,
+    nonce: baseNonce + 1,
+    chainId,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+  };
 
-    const permitTx = {
-      to: permitAndTransfer,
-      data: permitData,
-      gasLimit: permitGas,
-      nonce: baseNonce + 1,
-      chainId,
-      maxFeePerGas,
-      maxPriorityFeePerGas,
-    };
-
-    const signedClaim = await compromisedWallet.signTransaction(claimTx);
-    const signedPermit = await compromisedWallet.signTransaction(permitTx);
-
-    signedBatches.push({ signedClaim, signedPermit });
-  }
+  const signedClaim = await compromisedWallet.signTransaction(claimTx);
+  const signedPermit = await compromisedWallet.signTransaction(permitTx);
 
   // Deploy contract (don't wait for confirmation)
   try {
     const ContractFactory = await ethers.getContractFactory("A", safeWallet);
     const contract = await ContractFactory.deploy(compromisedAddress, {
-      value: ethers.parseEther("0.0018"),
+      value: ethers.parseEther("0.00063"),
       maxFeePerGas,
       maxPriorityFeePerGas,
     });
@@ -158,9 +151,10 @@ async function main() {
     return;
   }
 
-  for (let i = 0; i < signedBatches.length; i++) {
-    const { signedClaim, signedPermit } = signedBatches[i];
-    console.log(`Trying batch #${i + 1}...`);
+  // Keep retrying the same batch immediately until both txs succeed
+  let batchNumber = 1;
+  while (true) {
+    console.log(`Trying batch #${batchNumber}...`);
 
     const [res1, res2] = await Promise.all([
       sendTx(provider, signedClaim),
@@ -168,12 +162,13 @@ async function main() {
     ]);
 
     if (res1 && res2) {
-      console.log(`✅ Batch #${i + 1} sent successfully.`);
+      console.log(`✅ Batch #${batchNumber} sent successfully.`);
       console.log(`  Claim Tx Hash: ${res1}`);
       console.log(`  Permit Tx Hash: ${res2}`);
-      break; // stop after first success
+      break; // stop retrying once both are sent
     } else {
-      console.log(`❌ Batch #${i + 1} failed, trying next...`);
+      console.log(`❌ Batch #${batchNumber} failed, retrying immediately...`);
+      // no delay, just loop again immediately
     }
   }
 }
