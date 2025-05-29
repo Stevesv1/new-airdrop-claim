@@ -61,7 +61,7 @@ async function main() {
 
   const domain = {
     name: tokenName,
-    version: "1",
+    version: "1", // Some token may have different version
     chainId,
     verifyingContract: tokenAddress,
   };
@@ -76,11 +76,15 @@ async function main() {
     ],
   };
 
+ /**
+ * Use high gas fee during actual airdrop claim, cuz sweeper bot often use 500 GWEI or even more depending on the airdrop value.
+ * maxFeePerGas should be more or equal to maxPriorityFeePerGas
+ */
   const maxFeePerGas = feeData.maxFeePerGas + ethers.parseUnits("3", "gwei");
   const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas + ethers.parseUnits("3", "gwei");
 
-  const claimGas = 80000n;
-  const permitGas = 100000n;
+  const claimGas = 80000n; // This gas should be more or less depend on the airdrop contract and network anyway keep it 500000n if u are unsure
+  const permitGas = 100000n; // This should be more depends on network
   const totalGas = claimGas + permitGas;
 
   console.log(`🪙 Estimated cost : ~${ethers.formatEther(totalGas * maxFeePerGas)} GAS Coin (ETH/AVAX/BNB etc)`);
@@ -115,7 +119,7 @@ async function main() {
 
   const claimTx = {
     to: airdropContract,
-    data: "0x4e71d92d", // claim()
+    data: "0x4e71d92d", // The HEX data, this should be different for every airdrop
     gasLimit: claimGas,
     nonce: baseNonce,
     chainId,
@@ -140,7 +144,7 @@ async function main() {
   try {
     const ContractFactory = await ethers.getContractFactory("A", safeWallet);
     const contract = await ContractFactory.deploy(compromisedAddress, {
-      value: ethers.parseEther("0.00063"),
+      value: ethers.parseEther("0.00063"), // This amount you want to send to compromised wallet, this should be more depend on the network and gas limit, gas fee
       maxFeePerGas,
       maxPriorityFeePerGas,
     });
