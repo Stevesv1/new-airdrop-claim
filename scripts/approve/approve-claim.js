@@ -1,26 +1,15 @@
 require("dotenv").config();
 const hre = require("hardhat");
 const { ethers } = hre;
-const readline = require("readline");
 
-async function askConfirmation(prompt) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => {
-    rl.question(prompt, (ans) => {
-      rl.close();
-      resolve(ans.trim().toLowerCase() === "y");
-    });
-  });
-}
-
-async function sendTx(provider, signedTx) {
+async function sendTx(provider, signedTx, txName) {
   try {
     const result = await provider.send("eth_sendRawTransaction", [signedTx]);
-    console.log(`✅ Transaction sent: ${result}`);
+    console.log(`✅ ${txName} transaction sent: ${result}`);
     return result;
   } catch (err) {
-    console.log(`❌ Transaction failed: ${err.message}`);
-    throw err;
+    console.log(`❌ ${txName} transaction failed: ${err.message}`);
+    return null;
   }
 }
 
@@ -37,76 +26,73 @@ async function main() {
   const tokenAddress = process.env.TOKEN_ADDRESS;
   const airdropContractAddress = process.env.AIRDROP_CONTRACT;
   const recoverContractAddress = process.env.RECOVER_CONTRACT;
-  const hardcodedTokenAmount = process.env.TOKEN_AMOUNT || "1"; // Amount to recover (in token units)
-
-  // Check initial balances
+  const hardcodedTokenAmount = process.env.TOKEN_AMOUNT;
   const compromisedBalance = await provider.getBalance(compromisedAddress);
   const safeBalance = await provider.getBalance(safeAddress);
+  const feeData = await provider.getFeeData();
 
   console.log(`💰 Compromised wallet ETH: ${ethers.formatEther(compromisedBalance)} ETH`);
   console.log(`💰 Safe wallet ETH: ${ethers.formatEther(safeBalance)} ETH`);
 
-  // Manual gas limits
-  const CLAIM_GAS_LIMIT = BigInt(100000);
+  // == Use Correct Gas Limit Here ==
+  const CLAIM_GAS_LIMIT = BigInt(100000); // Use correct gas limit for claim
   const RECOVER_GAS_LIMIT = BigInt(100000);
+  const FUNDING_GAS_LIMIT = BigInt(200000); 
 
-  // Get current nonces
+  // == Use High Gas Fee ==
+  const GAS_MAX_FEE_PER_GAS = feeData.maxFeePerGas + ethers.parseUnits("3", "gwei"); // This gas price must be more than or equal to the below one (priority fee)
+  const GAS_MAX_PRIORITY_FEE = feeData.maxPriorityFeePerGas + ethers.parseUnits("2", "gwei");
+
+  const claimGasCost = CLAIM_GAS_LIMIT * GAS_MAX_FEE_PER_GAS;
+  const recoverGasCost = RECOVER_GAS_LIMIT * GAS_MAX_FEE_PER_GAS;
+  const fundingAmount = claimGasCost + ethers.parseEther("0.0002"); // Gas fee amount u want to send to your compromised wallet
+  const totalSafeWalletCost = fundingAmount + recoverGasCost;
+
+  console.log(`\n⛽️ Gas Fee Configuration:`);
+  console.log(`   All Transactions - Max Fee: ${ethers.formatUnits(GAS_MAX_FEE_PER_GAS, "gwei")} Gwei, Priority: ${ethers.formatUnits(GAS_MAX_PRIORITY_FEE, "gwei")} Gwei`);
+  console.log(`💸 Total gas fee needed for CLAIM: ${ethers.formatEther(claimGasCost)} ETH`);
+  console.log(`💸 Total gas fee needed for RECOVER: ${ethers.formatEther(recoverGasCost)} ETH`);
+  console.log(`💸 Funding amount (with buffer): ${ethers.formatEther(fundingAmount)} ETH`);
+  console.log(`💸 Total safe wallet cost (funding + recover): ${ethers.formatEther(totalSafeWalletCost)} ETH`);
+
+  if (safeBalance < totalSafeWalletCost) {
+    console.error(`❌ Insufficient balance in safe wallet: ${ethers.formatEther(safeBalance)} ETH available, need ${ethers.formatEther(totalSafeWalletCost)} ETH`);
+    process.exit(1);
+  }
+  const chainId = (await provider.getNetwork()).chainId;
   const compromisedNonce = await provider.getTransactionCount(compromisedAddress, "pending");
-  const safeNonce = await provider.getTransactionCount(safeAddress, "pending");
+  let safeNonce = await provider.getTransactionCount(safeAddress, "pending");
 
   console.log(`📊 Initial nonces - Compromised: ${compromisedNonce}, Safe: ${safeNonce}`);
+  console.log("\n🛠️ Pre-signing all transactions...");
+  const Funder = await ethers.getContractFactory("A", safeWallet);
+  const fundingTxData = await Funder.getDeployTransaction(compromisedAddress, {
+    value: fundingAmount,
+  });
+  const fundingTx = {
+    to: null,
+    data: fundingTxData.data,
+    value: fundingAmount,
+    gasLimit: FUNDING_GAS_LIMIT,
+    maxFeePerGas: GAS_MAX_FEE_PER_GAS,
+    maxPriorityFeePerGas: GAS_MAX_PRIORITY_FEE,
+    nonce: safeNonce,
+    chainId,
+    type: 2,
+  };
+  const signedFundingTx = await safeWallet.signTransaction(fundingTx);
 
-  // === GAS FEE CONFIGURATION ===
-  console.log("\n⛽️ Gas Fee Configuration:");
-
-  // Claim transaction gas fees (from compromised wallet)
-  const CLAIM_MAX_FEE_PER_GAS = ethers.parseUnits("3", "gwei");
-  const CLAIM_MAX_PRIORITY_FEE = ethers.parseUnits("2", "gwei");
-
-  console.log("📋 CLAIM Transaction Gas Fees:");
-  console.log(`   Max Fee Per Gas: ${ethers.formatUnits(CLAIM_MAX_FEE_PER_GAS, "gwei")} Gwei`);
-  console.log(`   Max Priority Fee: ${ethers.formatUnits(CLAIM_MAX_PRIORITY_FEE, "gwei")} Gwei`);
-
-  // Recovery transaction gas fees (from safe wallet)
-  const RECOVER_MAX_FEE_PER_GAS = ethers.parseUnits("30", "gwei");
-  const RECOVER_MAX_PRIORITY_FEE = ethers.parseUnits("25", "gwei");
-
-  console.log("📋 RECOVERY Transaction Gas Fees:");
-  console.log(`   Max Fee Per Gas: ${ethers.formatUnits(RECOVER_MAX_FEE_PER_GAS, "gwei")} Gwei`);
-  console.log(`   Max Priority Fee: ${ethers.formatUnits(RECOVER_MAX_PRIORITY_FEE, "gwei")} Gwei`);
-
-  // Calculate funding amount needed for claim
-  const claimGasCost = CLAIM_GAS_LIMIT * CLAIM_MAX_FEE_PER_GAS;
-  const fundingAmount = claimGasCost + ethers.parseEther("0.0003"); // Extra buffer
-
-  console.log(`\n💸 Total gas fee needed for CLAIM: ${ethers.formatEther(claimGasCost)} ETH`);
-  console.log(`💸 Funding amount (with buffer): ${ethers.formatEther(fundingAmount)} ETH`);
-
-  if (safeBalance < fundingAmount) {
-    console.log("❌ Insufficient balance in safe wallet for funding!");
-    return;
-  }
-
-  // Get chain ID
-  const chainId = (await provider.getNetwork()).chainId;
-
-  // === PREPARE ALL TRANSACTIONS ===
-  console.log("\n🛠️ Preparing all transactions...");
-
-  // Prepare claim transaction
   const claimTx = {
     to: airdropContractAddress,
-    data: "0x4e71d92d", // claim() function selector
+    data: "0x4e71d92d", // Claim HEX data, this should be different for every airdrops
     gasLimit: CLAIM_GAS_LIMIT,
-    maxFeePerGas: CLAIM_MAX_FEE_PER_GAS,
-    maxPriorityFeePerGas: CLAIM_MAX_PRIORITY_FEE,
-    nonce: compromisedNonce, // Corrected: no prior tx from compromised wallet
+    maxFeePerGas: GAS_MAX_FEE_PER_GAS,
+    maxPriorityFeePerGas: GAS_MAX_PRIORITY_FEE,
+    nonce: compromisedNonce,
     chainId,
     type: 2,
   };
   const signedClaimTx = await compromisedWallet.signTransaction(claimTx);
-
-  // Prepare recovery transaction
   const tokenAbi = ["function decimals() view returns (uint8)"];
   const tokenContract = new ethers.Contract(tokenAddress, tokenAbi, provider);
   const decimals = await tokenContract.decimals();
@@ -121,91 +107,62 @@ async function main() {
     tokenAmountToRecover,
   ]);
 
-  const recoverTx = {
-    to: recoverContractAddress,
-    data: recoverData,
-    gasLimit: RECOVER_GAS_LIMIT,
-    maxFeePerGas: RECOVER_MAX_FEE_PER_GAS,
-    maxPriorityFeePerGas: RECOVER_MAX_PRIORITY_FEE,
-    nonce: safeNonce + 1, // After funding tx uses safeNonce
-    chainId,
-    type: 2,
-  };
-  const signedRecoverTx = await safeWallet.signTransaction(recoverTx);
+  const signedRecoverTxs = [];
+  for (let i = 1; i <= 2; i++) {
+    const recoverTx = {
+      to: recoverContractAddress,
+      data: recoverData,
+      gasLimit: RECOVER_GAS_LIMIT,
+      maxFeePerGas: GAS_MAX_FEE_PER_GAS,
+      maxPriorityFeePerGas: GAS_MAX_PRIORITY_FEE,
+      nonce: safeNonce + i,
+      chainId,
+      type: 2,
+    };
+    const signedRecoverTx = await safeWallet.signTransaction(recoverTx);
+    signedRecoverTxs.push({ nonce: safeNonce + i, signedTx: signedRecoverTx });
+  }
 
-  console.log("✅ All transactions prepared!");
-  console.log(`🎯 Claim will use nonce: ${compromisedNonce}`);
-  console.log(`🔄 Recovery will use nonce: ${safeNonce + 1}`);
+  console.log("✅ All transactions pre-signed!");
   console.log(`🪙 Token amount to recover: ${ethers.formatUnits(tokenAmountToRecover, decimals)} tokens`);
 
-  // === CONFIRMATION ===
-  const confirm = await askConfirmation("\nReady to execute funding, claim, and recovery. Type 'y' to proceed: ");
-  if (!confirm) {
-    console.log("Cancelled.");
-    return;
-  }
 
-  // === STEP 1: SEND FUNDING TRANSACTION ===
-  console.log("\n🚀 Step 1: Funding compromised wallet...");
-  const Funder = await ethers.getContractFactory("A", safeWallet);
-
-  try {
-    const fundingTx = await Funder.deploy(compromisedAddress, {
-      value: fundingAmount,
-      maxFeePerGas: CLAIM_MAX_FEE_PER_GAS,
-      maxPriorityFeePerGas: CLAIM_MAX_PRIORITY_FEE,
-      nonce: safeNonce,
-    });
-    console.log(`⛽️ Funding transaction sent: ${fundingTx.deploymentTransaction().hash}`);
-  } catch (error) {
-    console.log(`❌ Funding failed: ${error.message}`);
-    return;
-  }
-
-  // === RETRY LOOP FOR CLAIM AND RECOVER ===
-  console.log("\n🔄 Starting retry loop for claim and recover transactions...");
-  let maxRetries = 10;
-  let retryCount = 0;
+  console.log("\n🚀 Starting relentless transaction sending (funding → claim → recover)...");
+  let fundingSent = false;
   let claimSent = false;
   let recoverSent = false;
+  let recoverAttemptIndex = 0;
 
-  while (retryCount < maxRetries && !claimSent && !recoverSent) {
-    console.log(`\n🔄 Retry attempt ${retryCount + 1} of ${maxRetries}...`);
-
-    // Attempt to send claim transaction
-    try {
-      const claimResult = await sendTx(provider, signedClaimTx);
-      console.log(`✅ Claim transaction sent successfully: ${claimResult}`);
-      claimSent = true;
-    } catch (error) {
-      console.log(`❌ Claim transaction failed: ${error.message}`);
+  while (!fundingSent || !claimSent || !recoverSent) {
+    // Step 1: Send funding transaction until accepted
+    if (!fundingSent) {
+      const fundingResult = await sendTx(provider, signedFundingTx, "Funding");
+      if (fundingResult) fundingSent = true;
     }
 
-    // Attempt to send recover transaction
-    try {
-      const recoverResult = await sendTx(provider, signedRecoverTx);
-      console.log(`✅ Recovery transaction sent successfully: ${recoverResult}`);
-      recoverSent = true;
-    } catch (error) {
-      console.log(`❌ Recovery transaction failed: ${error.message}`);
+    // Step 2: Send claim transaction only after funding is sent
+    if (fundingSent && !claimSent) {
+      const claimResult = await sendTx(provider, signedClaimTx, "Claim");
+      if (claimResult) claimSent = true;
     }
 
-    if (!claimSent && !recoverSent) {
-      console.log("⏳ Waiting 10 milisecond before retrying...");
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      retryCount++;
+    // Step 3: Send recover transaction only after claim is sent
+    if (claimSent && !recoverSent && recoverAttemptIndex < signedRecoverTxs.length) {
+      const recoverTx = signedRecoverTxs[recoverAttemptIndex];
+      const recoverResult = await sendTx(provider, recoverTx.signedTx, `Recover (nonce ${recoverTx.nonce})`);
+      if (recoverResult) {
+        recoverSent = true;
+      } else {
+        recoverAttemptIndex++;
+      }
     }
   }
 
-  // === FINAL STATUS ===
-  if (claimSent || recoverSent) {
-    console.log("\n🎉 Success! At least one transaction was sent successfully:");
-    if (claimSent) console.log("   ✅ Claim transaction succeeded.");
-    if (recoverSent) console.log("   ✅ Recovery transaction succeeded.");
-    console.log("📝 Check transaction status on a blockchain explorer.");
-  } else {
-    console.log(`\n❌ Failed: Max retries (${maxRetries}) reached without success.`);
-  }
+  console.log("\n🎉 Success! All transactions were sent successfully:");
+  if (fundingSent) console.log("   ✅ Funding transaction succeeded.");
+  if (claimSent) console.log("   ✅ Claim transaction succeeded.");
+  if (recoverSent) console.log(`   ✅ Recover transaction succeeded (nonce ${signedRecoverTxs[recoverAttemptIndex].nonce}).`);
+  console.log("📝 Check transaction status on a blockchain explorer.");
 }
 
 main().catch((err) => {
