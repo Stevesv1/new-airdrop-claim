@@ -10,8 +10,8 @@ async function main() {
 
   await contract.waitForDeployment();
 
-  console.log("PermitAndTransfer deployed to:", await contract.getAddress());
-  console.log("Add contract address to your .env file as RECOVER_CONTRACT");
+  console.log("PermitTransfer contract address :", await contract.getAddress());
+  console.log("Add contract address to your .env file as PERMIT_TRANSFER_CONTRACT");
 }
 
 main().catch((error) => {
