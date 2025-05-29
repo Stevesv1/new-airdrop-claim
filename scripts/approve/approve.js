@@ -94,7 +94,7 @@ async function main() {
 
   // === Reminder to update .env ===
   console.log(`📌 TokenRecover contract address : ${spenderAddress}`);
-  console.log("👉 Add contract address to your .env file as TOKEN_RECOVER");
+  console.log("👉 Add contract address to your .env file as RECOVER_CONTRACT");
 }
 
 main().catch((err) => {
